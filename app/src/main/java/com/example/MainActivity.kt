@@ -17,14 +17,17 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -32,6 +35,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
@@ -95,9 +100,42 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val ringtonePickerLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val uri = result.data?.getParcelableExtra<android.net.Uri>(android.media.RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            if (uri != null) {
+                val ringtone = android.media.RingtoneManager.getRingtone(this, uri)
+                val title = ringtone.getTitle(this) ?: "Пользовательский рингтон"
+                getSharedPreferences("saturnium_alarm_prefs", Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("selected_ringtone_uri", uri.toString())
+                    .putString("selected_ringtone_name", title)
+                    .apply()
+                viewModel.refreshRingtoneName()
+                Toast.makeText(this, "Мелодия успешно изменена!", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Turn screen on and show on top of lock screen when alarm is ringing
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+            )
+        }
 
         // Check/request notifications on Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -128,7 +166,36 @@ class MainActivity : ComponentActivity() {
                             )
                             .padding(innerPadding)
                     ) {
-                        SaturniumAppScreen(viewModel = viewModel)
+                        SaturniumAppScreen(
+                            viewModel = viewModel,
+                            onLaunchRingtonePicker = {
+                                val intent = Intent(android.media.RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                                    putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_TYPE, android.media.RingtoneManager.TYPE_ALARM)
+                                    putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_TITLE, "Задать мелодию")
+                                    putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                                    putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
+                                    val existingUriStr = getSharedPreferences("saturnium_alarm_prefs", Context.MODE_PRIVATE)
+                                        .getString("selected_ringtone_uri", null)
+                                    if (!existingUriStr.isNullOrEmpty()) {
+                                        putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, android.net.Uri.parse(existingUriStr))
+                                    }
+                                }
+                                try {
+                                    ringtonePickerLauncher.launch(intent)
+                                } catch (e: Exception) {
+                                    Toast.makeText(this@MainActivity, "Выбор мелодии не поддерживается на данном устройстве", Toast.LENGTH_LONG).show()
+                                }
+                            },
+                            onResetRingtoneToDefault = {
+                                getSharedPreferences("saturnium_alarm_prefs", Context.MODE_PRIVATE)
+                                    .edit()
+                                    .putString("selected_ringtone_uri", "")
+                                    .putString("selected_ringtone_name", "По умолчанию (Системный)")
+                                    .apply()
+                                viewModel.refreshRingtoneName()
+                                Toast.makeText(this@MainActivity, "Установлена мелодия по умолчанию", Toast.LENGTH_SHORT).show()
+                            }
+                        )
 
                         // Alarm Ring overlay
                         if (isRinging) {
@@ -160,16 +227,29 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
+fun SaturniumAppScreen(
+    viewModel: SaturniumViewModel,
+    onLaunchRingtonePicker: () -> Unit,
+    onResetRingtoneToDefault: () -> Unit
+) {
     val activeCycle by viewModel.activeCycle.collectAsStateWithLifecycle()
     val activeDayConfigs by viewModel.activeDayConfigs.collectAsStateWithLifecycle()
     val currentMonth by viewModel.currentMonth.collectAsStateWithLifecycle()
     val nextAlarmString by viewModel.nextAlarmString.collectAsStateWithLifecycle()
+    val selectedRingtoneName by viewModel.selectedRingtoneName.collectAsStateWithLifecycle()
+    
+    val allCyclicReminders by viewModel.allCyclicReminders.collectAsStateWithLifecycle()
+    val allDateExclusions by viewModel.allDateExclusions.collectAsStateWithLifecycle()
 
     var showDatePickerDialog by remember { mutableStateOf(false) }
     var showTemplateDialog by remember { mutableStateOf(false) }
+    var showRingtoneOptionDialog by remember { mutableStateOf(false) }
     var selectedDayToEdit by remember { mutableStateOf<CycleDayConfig?>(null) }
+    var selectedCalendarCellForDetails by remember { mutableStateOf<CalendarCell?>(null) }
+    var showAddReminderDialog by remember { mutableStateOf(false) }
+    val customWeekSelections = remember { mutableStateListOf(true, false, true, false, true, false, false) }
 
     if (activeCycle == null) {
         Box(
@@ -195,17 +275,12 @@ fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
             SpaceHeaderSection(
                 cycle = currentCycleSafe,
                 nextAlarmString = nextAlarmString,
+                selectedRingtoneName = selectedRingtoneName,
                 onTriggerSimulation = { viewModel.triggerInstantSimulation() },
                 onSelectTemplate = { showTemplateDialog = true },
-                onSelectStartDate = { showDatePickerDialog = true }
+                onSelectStartDate = { showDatePickerDialog = true },
+                onSelectRingtone = { showRingtoneOptionDialog = true }
             )
-        }
-
-        // Horizontal Preset Shift Cards
-        item {
-            PresetsQuickRow(onApplyPreset = { templateId ->
-                viewModel.applyPresetTemplate(templateId)
-            })
         }
 
         // Custom Adaptive Column Calendar Widget
@@ -264,6 +339,7 @@ fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
                     for (i in 1..currentCycleSafe.cycleLength) {
                         val config = activeDayConfigs.find { it.dayIndex == i }
                         val isWork = config?.isWorkDay ?: false
+                        val customName = config?.shiftName ?: "День $i"
                         
                         Box(
                             modifier = Modifier
@@ -272,21 +348,30 @@ fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(if (isWork) IndigoPrimary.copy(alpha = 0.25f) else OffRedBg.copy(alpha = 0.5f))
                                 .border(1.dp, if (isWork) IndigoPrimary.copy(alpha = 0.5f) else OffRedText.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                .clickable {
+                                    if (config != null) {
+                                        selectedDayToEdit = config
+                                    }
+                                }
                                 .padding(vertical = 6.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(
-                                    text = "Днь $i",
-                                    fontSize = if (currentCycleSafe.cycleLength > 6) 10.sp else 12.sp,
-                                    color = TextSecondary,
-                                    maxLines = 1
+                                    text = customName,
+                                    fontSize = if (currentCycleSafe.cycleLength > 5) 9.sp else 11.sp,
+                                    color = if (isWork) IceBlueAccent else OffRedText,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 2.dp)
                                 )
                                 Text(
-                                    text = if (isWork) "Р" else "В",
-                                    fontSize = if (currentCycleSafe.cycleLength > 6) 10.sp else 12.sp,
-                                    color = if (isWork) IceBlueAccent else OffRedText,
-                                    fontWeight = FontWeight.Bold
+                                    text = "Днь $i",
+                                    fontSize = if (currentCycleSafe.cycleLength > 5) 8.sp else 9.sp,
+                                    color = TextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -328,6 +413,28 @@ fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
                                                 )
                                             }
 
+                                            val cellDateCal = Calendar.getInstance().apply {
+                                                timeInMillis = cell.dateMillis
+                                            }
+                                            val cellYear = cellDateCal.get(Calendar.YEAR)
+                                            val cellMonth = cellDateCal.get(Calendar.MONTH)
+                                            val cellDateStr = String.format("%04d-%02d-%02d", cellYear, cellMonth + 1, cell.dayOfMonth)
+                                            
+                                            val isCellExcluded = allDateExclusions.any { it.dateStr == cellDateStr }
+                                            
+                                            val cellCyclicRemindersCount = allCyclicReminders.count { r ->
+                                                if (!r.isEnabled) return@count false
+                                                if (r.type == "CYCLE_DAY") {
+                                                    r.targetCycleDay == cell.dayIndexInCycle
+                                                } else { // INTERVAL
+                                                    val start = r.startDateMillis ?: 0L
+                                                    val days = AlarmHelper.getDaysBetween(start, cell.dateMillis)
+                                                    val rInterval = r.intervalDays ?: 1
+                                                    days >= 0 && days % rInterval == 0
+                                                }
+                                            }
+                                            val hasCellCyclic = cellCyclicRemindersCount > 0
+
                                             val borderCol = when {
                                                 cell.isToday -> IceBlueAccent
                                                 cell.isWorkDay -> IndigoPrimary.copy(alpha = 0.40f)
@@ -345,13 +452,17 @@ fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
                                                     )
                                                     .clip(RoundedCornerShape(10.dp))
                                                     .background(cellBg)
-                                                    .clickable {
-                                                        // Toggle shift on click, or load detailed config in bottom list
-                                                        val targetConfig = activeDayConfigs.find { it.dayIndex == cell.dayIndexInCycle }
-                                                        if (targetConfig != null) {
-                                                            selectedDayToEdit = targetConfig
+                                                    .combinedClickable(
+                                                        onClick = {
+                                                            val targetConfig = activeDayConfigs.find { it.dayIndex == cell.dayIndexInCycle }
+                                                            if (targetConfig != null) {
+                                                                selectedDayToEdit = targetConfig
+                                                            }
+                                                        },
+                                                        onLongClick = {
+                                                            selectedCalendarCellForDetails = cell
                                                         }
-                                                    }
+                                                    )
                                                     .testTag("calendar_cell_${cell.dayOfMonth}"),
                                                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                                             ) {
@@ -370,14 +481,38 @@ fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
                                                             color = if (cell.isToday) IceBlueAccent else if (cell.isWorkDay) TextPrimary else OffRedText
                                                         )
                                                         
-                                                        // Mini indicator for Alarm
-                                                        if (cell.alarmEnabled && !cell.isBlank) {
-                                                            Icon(
-                                                                imageVector = Icons.Default.Notifications,
-                                                                contentDescription = "Будильник",
-                                                                tint = if (cell.isToday) IceBlueAccent else if (cell.isWorkDay) IceBlueAccent else OffRedText,
-                                                                modifier = Modifier.size(if (currentCycleSafe.cycleLength > 6) 8.dp else 11.dp)
-                                                            )
+                                                        Row(
+                                                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            // Regular Alarm status: active, excluded, or none
+                                                            if (cell.alarmEnabled && !cell.isBlank) {
+                                                                if (isCellExcluded) {
+                                                                    Icon(
+                                                                        imageVector = Icons.Default.NotificationsOff,
+                                                                        contentDescription = "Регулярный отключен на сегодня",
+                                                                        tint = Color.Gray,
+                                                                        modifier = Modifier.size(if (currentCycleSafe.cycleLength > 6) 9.dp else 12.dp)
+                                                                    )
+                                                                } else {
+                                                                    Icon(
+                                                                        imageVector = Icons.Default.Notifications,
+                                                                        contentDescription = "Регулярный будильник",
+                                                                        tint = if (cell.isToday) IceBlueAccent else if (cell.isWorkDay) IceBlueAccent else OffRedText,
+                                                                        modifier = Modifier.size(if (currentCycleSafe.cycleLength > 6) 9.dp else 12.dp)
+                                                                    )
+                                                                }
+                                                            }
+                                                            
+                                                            // Cyclic reminders indicator
+                                                            if (hasCellCyclic && !cell.isBlank) {
+                                                                Icon(
+                                                                    imageVector = Icons.Default.Star,
+                                                                    contentDescription = "Циклическое напоминание",
+                                                                    tint = Color(0xFFFFD700),
+                                                                    modifier = Modifier.size(if (currentCycleSafe.cycleLength > 6) 9.dp else 12.dp)
+                                                                )
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -422,7 +557,7 @@ fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
                         modifier = Modifier
                             .size(36.dp)
                             .background(ImmersiveCardBg, CircleShape),
-                        enabled = currentCycleSafe.cycleLength < 14
+                        enabled = currentCycleSafe.cycleLength < 21
                     ) {
                         Icon(Icons.Default.Add, "Lengthen cycle", tint = TextPrimary, modifier = Modifier.size(16.dp))
                     }
@@ -439,18 +574,216 @@ fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
                 onEditClick = { selectedDayToEdit = dayConfig }
             )
         }
+
+        item {
+            Spacer(modifier = Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Циклические напоминания",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Bold
+                )
+                
+                Button(
+                    onClick = { showAddReminderDialog = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = IceBlueAccent),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AddAlarm,
+                        contentDescription = "Добавить",
+                        tint = Color(0xFF002D6E),
+                        modifier = Modifier.size(16.dp).padding(end = 4.dp)
+                    )
+                    Text("Создать", color = Color(0xFF002D6E), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        if (allCyclicReminders.isEmpty()) {
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(ImmersiveCardBg)
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "Нет созданных напоминаний. Нажмите 'Создать', чтобы настроить.",
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        } else {
+            items(allCyclicReminders) { reminder ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(ImmersiveCardBg)
+                        .border(1.dp, ImmersiveBorder, RoundedCornerShape(12.dp))
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = reminder.label,
+                            color = TextPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        val typeText = if (reminder.type == "CYCLE_DAY") {
+                            "Каждый день ${reminder.targetCycleDay} в цикле"
+                        } else {
+                            "Каждые ${reminder.intervalDays} дн., начиная с x"
+                        }
+                        Text(
+                            text = typeText,
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                        Text(
+                            text = String.format("Время: %02d:%02d", reminder.hour, reminder.minute),
+                            color = IceBlueAccent,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    
+                    IconButton(
+                        onClick = { viewModel.deleteCyclicReminder(reminder) }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Удалить напоминание",
+                            tint = OffRedText
+                        )
+                    }
+                }
+            }
+        }
     }
 
     // Modal dialog for selecting template cycle
     if (showTemplateDialog) {
         AlertDialog(
             onDismissRequest = { showTemplateDialog = false },
-            title = { Text("Выбор графика работы", color = TextPrimary) },
+            title = { 
+                Text(
+                    "Настройка графика работы", 
+                    color = TextPrimary, 
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 20.sp
+                ) 
+            },
             containerColor = ImmersiveSurface,
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(
+                    modifier = Modifier
+                        .verticalScroll(rememberScrollState())
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Custom Weekly Calendar Builder Section
+                    Text(
+                        text = "Свой недельный график (Пн-Вс)",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = IceBlueAccent,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                    )
+                    
+                    Text(
+                        text = "Выберите дни, в которые вы работаете (выбранные дни станут рабочими сменами):",
+                        fontSize = 11.sp,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                    
+                    val russianDaysShort = listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        russianDaysShort.forEachIndexed { index, dayName ->
+                            val isSelected = customWeekSelections[index]
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isSelected) IceBlueAccent else ImmersiveCardBg)
+                                    .clickable {
+                                        customWeekSelections[index] = !isSelected
+                                    }
+                                    .border(
+                                        1.dp,
+                                        if (isSelected) Color.Transparent else ImmersiveBorder,
+                                        CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = dayName,
+                                    color = if (isSelected) Color(0xFF002D6E) else TextPrimary,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                    
+                    Button(
+                        onClick = {
+                            viewModel.applyCustomWeeklyCycle(customWeekSelections.toList())
+                            showTemplateDialog = false
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = IceBlueAccent
+                        ),
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            "Применить недельный график", 
+                            color = Color(0xFF002D6E), 
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(ImmersiveBorder)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // Ready Presets Section
+                    Text(
+                        text = "Готовые шаблоны",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = IceBlueAccent,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+
                     val presets = listOf(
                         Pair(1, "График 3 через 1 (Стандарт)"),
+                        Pair(6, "График 1 через 3 (1р / 3в)"),
                         Pair(2, "График 2 через 2"),
                         Pair(3, "Смена: День-Ночь-Выходной"),
                         Pair(4, "График 1 через 1"),
@@ -458,24 +791,44 @@ fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
                     )
 
                     presets.forEach { (id, label) ->
+                        val isSelected = currentCycleSafe.name.contains(label.substring(0, 5))
                         Button(
                             onClick = {
                                 viewModel.applyPresetTemplate(id)
                                 showTemplateDialog = false
                             },
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = if (currentCycleSafe.name.contains(label.substring(0, 5))) IceBlueAccent else ImmersiveCardBg
+                                containerColor = IceBlueAccent
                             ),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            shape = RoundedCornerShape(12.dp)
                         ) {
-                            Text(label, color = if (currentCycleSafe.name.contains(label.substring(0, 5))) Color(0xFF002D6E) else TextPrimary)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Выбран",
+                                        tint = Color(0xFF002D6E),
+                                        modifier = Modifier.size(16.dp).padding(end = 4.dp)
+                                    )
+                                }
+                                Text(
+                                    label, 
+                                    color = Color(0xFF002D6E),
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
+                                    fontSize = 13.sp
+                                )
+                            }
                         }
                     }
                 }
             },
             confirmButton = {
                 TextButton(onClick = { showTemplateDialog = false }) {
-                    Text("Закрыть", color = IceBlueAccent)
+                    Text("Закрыть", color = IceBlueAccent, fontWeight = FontWeight.Bold)
                 }
             }
         )
@@ -573,11 +926,11 @@ fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
                                 Text("Минуты", color = IceBlueAccent, fontSize = 12.sp)
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    IconButton(onClick = { tempMinute = (tempMinute - 5 + 60) % 60 }) {
+                                    IconButton(onClick = { tempMinute = (tempMinute - 1 + 60) % 60 }) {
                                         Icon(Icons.Default.KeyboardArrowDown, "Dec min", tint = TextPrimary)
                                     }
                                     Text(String.format("%02d", tempMinute), color = TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                                    IconButton(onClick = { tempMinute = (tempMinute + 5) % 60 }) {
+                                    IconButton(onClick = { tempMinute = (tempMinute + 1) % 60 }) {
                                         Icon(Icons.Default.KeyboardArrowUp, "Inc min", tint = TextPrimary)
                                     }
                                 }
@@ -610,15 +963,509 @@ fun SaturniumAppScreen(viewModel: SaturniumViewModel) {
             }
         )
     }
+
+    if (showRingtoneOptionDialog) {
+        AlertDialog(
+            onDismissRequest = { showRingtoneOptionDialog = false },
+            title = { Text("Мелодия Будильника", color = TextPrimary) },
+            containerColor = ImmersiveSurface,
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Текущий рингтон:\n$selectedRingtoneName",
+                        color = TextPrimary,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Button(
+                        onClick = {
+                            showRingtoneOptionDialog = false
+                            onLaunchRingtonePicker()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.MusicNote, contentDescription = null, tint = IceBlueAccent)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Выбрать новую мелодию...", color = TextPrimary)
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            showRingtoneOptionDialog = false
+                            onResetRingtoneToDefault()
+                        },
+                        border = BorderStroke(1.dp, IceBlueAccent.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Вернуть системную по умолчанию", color = IceBlueAccent)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showRingtoneOptionDialog = false }) {
+                    Text("Закрыть", color = IceBlueAccent)
+                }
+            }
+        )
+    }
+
+    if (selectedCalendarCellForDetails != null) {
+        val cell = selectedCalendarCellForDetails!!
+        val cellDateCal = Calendar.getInstance().apply {
+            timeInMillis = cell.dateMillis
+        }
+        val cellYear = cellDateCal.get(Calendar.YEAR)
+        val cellMonth = cellDateCal.get(Calendar.MONTH)
+        val cellDay = cell.dayOfMonth
+        
+        val monthLabelShort = when (cellMonth) {
+            0 -> "января"
+            1 -> "февраля"
+            2 -> "марта"
+            3 -> "апреля"
+            4 -> "мая"
+            5 -> "июня"
+            6 -> "июля"
+            7 -> "августа"
+            8 -> "сентября"
+            9 -> "октября"
+            10 -> "ноября"
+            11 -> "декабря"
+            else -> ""
+        }
+        val dayOfWeekLabel = when (cellDateCal.get(Calendar.DAY_OF_WEEK)) {
+            Calendar.MONDAY -> "Понедельник"
+            Calendar.TUESDAY -> "Вторник"
+            Calendar.WEDNESDAY -> "Среда"
+            Calendar.THURSDAY -> "Четверг"
+            Calendar.FRIDAY -> "Пятница"
+            Calendar.SATURDAY -> "Суббота"
+            Calendar.SUNDAY -> "Воскресенье"
+            else -> "Неизвестно"
+        }
+        val dateTitle = "$cellDay $monthLabelShort $cellYear"
+        val cellDateStr = String.format("%04d-%02d-%02d", cellYear, cellMonth + 1, cellDay)
+        
+        val isExcluded = allDateExclusions.any { it.dateStr == cellDateStr }
+        val matchedConfig = activeDayConfigs.find { it.dayIndex == cell.dayIndexInCycle }
+
+        val matchedReminders = allCyclicReminders.filter { r ->
+            if (!r.isEnabled) false
+            else if (r.type == "CYCLE_DAY") {
+                r.targetCycleDay == cell.dayIndexInCycle
+            } else {
+                val start = r.startDateMillis ?: 0L
+                val days = AlarmHelper.getDaysBetween(start, cell.dateMillis)
+                val rInterval = r.intervalDays ?: 1
+                days >= 0 && days % rInterval == 0
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { selectedCalendarCellForDetails = null },
+            title = {
+                Column {
+                    Text(dateTitle, color = IceBlueAccent, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(dayOfWeekLabel, color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
+                }
+            },
+            containerColor = ImmersiveSurface,
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Все будильники на этот день:", color = IceBlueAccent, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    
+                    var hasAlarms = false
+                    
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        // Regular Alarm
+                        if (matchedConfig != null && matchedConfig.alarmEnabled) {
+                            hasAlarms = true
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(ImmersiveInnerSurface)
+                                    .border(1.dp, ImmersiveBorder, RoundedCornerShape(12.dp))
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Регулярный сменный",
+                                        color = TextPrimary,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp
+                                    )
+                                    Text(
+                                        text = "${matchedConfig.shiftName} (День ${matchedConfig.dayIndex})",
+                                        color = TextSecondary,
+                                        fontSize = 12.sp
+                                    )
+                                    Text(
+                                        text = String.format("Время: %02d:%02d", matchedConfig.alarmHour, matchedConfig.alarmMinute),
+                                        color = IceBlueAccent,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    if (isExcluded) {
+                                        Text(
+                                            text = "ОТКЛЮЧЕН НА ЭТОТ ДЕНЬ",
+                                            color = OffRedText,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                }
+                                
+                                Button(
+                                    onClick = {
+                                        viewModel.toggleDateExclusion(cellDateStr, !isExcluded)
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (isExcluded) IceBlueAccent else OffRedText.copy(alpha = 0.2f)
+                                    ),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = if (isExcluded) "Включить" else "Отгул/Выкл",
+                                        color = if (isExcluded) Color(0xFF002D6E) else OffRedText,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                        
+                        // Cyclic reminders
+                        matchedReminders.forEach { r ->
+                            hasAlarms = true
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(ImmersiveInnerSurface)
+                                    .border(1.dp, ImmersiveBorder, RoundedCornerShape(12.dp))
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text(
+                                        text = "Циклическое напоминание",
+                                        color = Color(0xFFFFD700),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp
+                                    )
+                                    Text(
+                                        text = r.label,
+                                        color = TextPrimary,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = String.format("Время: %02d:%02d", r.hour, r.minute),
+                                        color = IceBlueAccent,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                                Icon(
+                                    imageVector = Icons.Default.Star,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFFD700)
+                                )
+                            }
+                        }
+                        
+                        if (!hasAlarms) {
+                            Text(
+                                text = "Будильников на этот день нет.",
+                                color = TextSecondary,
+                                fontSize = 14.sp,
+                                modifier = Modifier.padding(vertical = 8.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedCalendarCellForDetails = null }) {
+                    Text("Закрыть", color = IceBlueAccent, fontWeight = FontWeight.Bold)
+                }
+            }
+        )
+    }
+
+    if (showAddReminderDialog) {
+        var reminderLabel by remember { mutableStateOf("Мое Напоминание") }
+        var reminderType by remember { mutableStateOf("CYCLE_DAY") }
+        var targetCycleDay by remember { mutableStateOf(1) }
+        var intervalDays by remember { mutableStateOf(3) }
+        
+        val today = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        var startDateMillis by remember { mutableStateOf(today.timeInMillis) }
+        var selectedHour by remember { mutableStateOf(8) }
+        var selectedMinute by remember { mutableStateOf(0) }
+        
+        var showReminderDatePicker by remember { mutableStateOf(false) }
+
+        if (showReminderDatePicker) {
+            val datePickerContext = LocalContext.current
+            val dpCal = Calendar.getInstance().apply { timeInMillis = startDateMillis }
+            LaunchedEffect(Unit) {
+                android.app.DatePickerDialog(
+                    datePickerContext,
+                    { _: android.widget.DatePicker, year: Int, month: Int, dayOfMonth: Int ->
+                        val selectedCal = Calendar.getInstance().apply {
+                            set(Calendar.YEAR, year)
+                            set(Calendar.MONTH, month)
+                            set(Calendar.DAY_OF_MONTH, dayOfMonth)
+                            set(Calendar.HOUR_OF_DAY, 0)
+                            set(Calendar.MINUTE, 0)
+                            set(Calendar.SECOND, 0)
+                            set(Calendar.MILLISECOND, 0)
+                        }
+                        startDateMillis = selectedCal.timeInMillis
+                        showReminderDatePicker = false
+                    },
+                    dpCal.get(Calendar.YEAR),
+                    dpCal.get(Calendar.MONTH),
+                    dpCal.get(Calendar.DAY_OF_MONTH)
+                ).apply {
+                    setOnDismissListener { showReminderDatePicker = false }
+                }.show()
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { showAddReminderDialog = false },
+            title = {
+                Text(
+                    "Новое циклическое напоминание",
+                    color = IceBlueAccent,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            },
+            containerColor = ImmersiveSurface,
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    OutlinedTextField(
+                        value = reminderLabel,
+                        onValueChange = { reminderLabel = it },
+                        label = { Text("Название напоминания", color = IceBlueAccent) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = IceBlueAccent,
+                            unfocusedBorderColor = ImmersiveBorder,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Text("Тип периодичности:", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { reminderType = "CYCLE_DAY" },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (reminderType == "CYCLE_DAY") IceBlueAccent else ImmersiveCardBg
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                "День цикла",
+                                color = if (reminderType == "CYCLE_DAY") Color(0xFF002D6E) else TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Button(
+                            onClick = { reminderType = "INTERVAL" },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (reminderType == "INTERVAL") IceBlueAccent else ImmersiveCardBg
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                "Интервал (дн)",
+                                color = if (reminderType == "INTERVAL") Color(0xFF002D6E) else TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    if (reminderType == "CYCLE_DAY") {
+                        Column {
+                            Text(
+                                "Вызывать в день цикла #: $targetCycleDay",
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Slider(
+                                value = targetCycleDay.toFloat(),
+                                onValueChange = { targetCycleDay = it.toInt() },
+                                valueRange = 1f..currentCycleSafe.cycleLength.toFloat(),
+                                steps = if (currentCycleSafe.cycleLength > 1) currentCycleSafe.cycleLength - 2 else 0,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = IceBlueAccent,
+                                    activeTrackColor = IceBlueAccent,
+                                    inactiveTrackColor = ImmersiveBorder
+                                )
+                            )
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Повторять каждые (дн):", color = TextPrimary, fontSize = 14.sp)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    IconButton(
+                                        onClick = { if (intervalDays > 1) intervalDays-- },
+                                        modifier = Modifier.background(ImmersiveCardBg, RoundedCornerShape(4.dp)).size(32.dp)
+                                    ) {
+                                        Text("-", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp, textAlign = TextAlign.Center)
+                                    }
+                                    Text("$intervalDays", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                    IconButton(
+                                        onClick = { intervalDays++ },
+                                        modifier = Modifier.background(ImmersiveCardBg, RoundedCornerShape(4.dp)).size(32.dp)
+                                    ) {
+                                        Text("+", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp, textAlign = TextAlign.Center)
+                                    }
+                                }
+                            }
+
+                            val dateFormat = SimpleDateFormat("dd MMMM yyyy", Locale("ru"))
+                            val startLabel = dateFormat.format(Date(startDateMillis))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(ImmersiveCardBg)
+                                    .clickable { showReminderDatePicker = true }
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text("Дата начала отсчета", color = TextSecondary, fontSize = 11.sp)
+                                    Text(startLabel, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Icon(Icons.Default.DateRange, contentDescription = "Календарь", tint = IceBlueAccent)
+                            }
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(ImmersiveBorder)
+                    )
+
+                    Text(
+                        "Выберите время (прокрутка валиком):",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(bottom = 2.dp)
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        WheelPicker(
+                            range = 0..23,
+                            selectedValue = selectedHour,
+                            onValueChange = { selectedHour = it },
+                            label = "Часы"
+                        )
+                        
+                        Text(":", color = TextPrimary, fontSize = 32.sp, fontWeight = FontWeight.Bold)
+
+                        WheelPicker(
+                            range = 0..59,
+                            selectedValue = selectedMinute,
+                            onValueChange = { selectedMinute = it },
+                            label = "Минуты"
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.addCyclicReminder(
+                            label = reminderLabel,
+                            type = reminderType,
+                            targetCycleDay = if (reminderType == "CYCLE_DAY") targetCycleDay else null,
+                            intervalDays = if (reminderType == "INTERVAL") intervalDays else null,
+                            startDateMillis = if (reminderType == "INTERVAL") startDateMillis else null,
+                            hour = selectedHour,
+                            minute = selectedMinute
+                        )
+                        showAddReminderDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = IceBlueAccent)
+                ) {
+                    Text("Создать", color = Color(0xFF002D6E), fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddReminderDialog = false }) {
+                    Text("Отмена", color = TextSecondary)
+                }
+            }
+        )
+    }
 }
 
 @Composable
 fun SpaceHeaderSection(
     cycle: ShiftCycle,
     nextAlarmString: String,
+    selectedRingtoneName: String,
     onTriggerSimulation: () -> Unit,
     onSelectTemplate: () -> Unit,
-    onSelectStartDate: () -> Unit
+    onSelectStartDate: () -> Unit,
+    onSelectRingtone: () -> Unit
 ) {
     val dateStr = remember(cycle.startDateMillis) {
         val sdf = SimpleDateFormat("dd MMMM yyyy", Locale("ru"))
@@ -719,21 +1566,55 @@ fun SpaceHeaderSection(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = cycle.name,
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary,
-                    fontSize = 14.sp
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = "Старт: $dateStr",
                     fontSize = 12.sp,
                     color = TextSecondary
                 )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .clickable { onSelectRingtone() }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MusicNote,
+                        contentDescription = "Мелодия",
+                        tint = IceBlueAccent,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = selectedRingtoneName,
+                        fontSize = 11.sp,
+                        color = IceBlueAccent,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Ringtone selection trigger
+                IconButton(
+                    onClick = onSelectRingtone,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(ImmersiveCardBg, CircleShape)
+                ) {
+                    Icon(Icons.Default.MusicNote, "Мелодия", tint = IceBlueAccent, modifier = Modifier.size(18.dp))
+                }
+
                 // Calendar trigger
                 IconButton(
                     onClick = onSelectStartDate,
@@ -840,6 +1721,7 @@ fun drawRingFront(drawScope: androidx.compose.ui.graphics.drawscope.DrawScope, c
 fun PresetsQuickRow(onApplyPreset: (Int) -> Unit) {
     val presets = listOf(
         Triple(1, "3 через 1", "3р / 1в"),
+        Triple(6, "1 через 3", "1р / 3в"),
         Triple(2, "2 через 2", "2р / 2в"),
         Triple(3, "День/Ночь", "День / Ночь / 2в"),
         Triple(5, "5 через 2", "5р / 2в")
@@ -1229,6 +2111,105 @@ fun RingingAlarmOverlay(
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.sp
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun WheelPicker(
+    range: IntRange,
+    selectedValue: Int,
+    onValueChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    label: String = ""
+) {
+    val size = range.last - range.first + 1
+    // Place initial positioning in target repetition block
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = selectedValue + size * 4)
+    
+    LaunchedEffect(selectedValue) {
+        val layoutInfo = listState.layoutInfo
+        val visibleItems = layoutInfo.visibleItemsInfo
+        val currentCentered = visibleItems.minByOrNull {
+            val centerOffset = layoutInfo.viewportEndOffset / 2
+            val itemCenter = it.offset + (it.size / 2)
+            kotlin.math.abs(itemCenter - centerOffset)
+        }
+        val currentVal = currentCentered?.let { range.first + (it.index % size) }
+        if (currentVal != selectedValue) {
+            listState.scrollToItem(selectedValue + size * 4)
+        }
+    }
+    
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (!listState.isScrollInProgress) {
+            val layoutInfo = listState.layoutInfo
+            val visibleItems = layoutInfo.visibleItemsInfo
+            if (visibleItems.isNotEmpty()) {
+                val centerOffset = layoutInfo.viewportEndOffset / 2
+                val closest = visibleItems.minByOrNull {
+                    val itemCenter = it.offset + (it.size / 2)
+                    kotlin.math.abs(itemCenter - centerOffset)
+                }
+                closest?.let {
+                    val index = it.index % size
+                    onValueChange(range.first + index)
+                }
+            }
+        }
+    }
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+    ) {
+        Text(text = label, color = IceBlueAccent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(4.dp))
+        
+        Box(
+            modifier = Modifier
+                .height(130.dp)
+                .width(64.dp)
+                .background(ImmersiveInnerSurface, RoundedCornerShape(12.dp))
+                .border(2.dp, IceBlueAccent.copy(alpha = 0.5f), RoundedCornerShape(12.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(36.dp)
+                    .background(IceBlueAccent.copy(alpha = 0.12f))
+                    .border(BorderStroke(1.dp, IceBlueAccent.copy(alpha = 0.3f)))
+            )
+            
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(vertical = 46.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                items(size * 10) { index ->
+                    val value = range.first + (index % size)
+                    val isSelected = value == selectedValue
+                    
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(36.dp)
+                            .clickable {
+                                onValueChange(value)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = String.format("%02d", value),
+                            color = if (isSelected) TextPrimary else TextSecondary.copy(alpha = 0.5f),
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = if (isSelected) 20.sp else 16.sp
+                        )
+                    }
+                }
             }
         }
     }

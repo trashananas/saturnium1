@@ -56,4 +56,31 @@ interface SaturniumDao {
 
     @Query("UPDATE shift_cycles SET isActive = 0")
     suspend fun deactivateAllCycles()
+
+    // Cyclic Reminders
+    @Query("SELECT * FROM cyclic_reminders ORDER BY id DESC")
+    fun getAllCyclicRemindersFlow(): Flow<List<CyclicReminder>>
+
+    @Query("SELECT * FROM cyclic_reminders ORDER BY id DESC")
+    suspend fun getAllCyclicRemindersDirect(): List<CyclicReminder>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCyclicReminder(reminder: CyclicReminder): Long
+
+    @Delete
+    suspend fun deleteCyclicReminder(reminder: CyclicReminder)
+
+    // Date Exclusions
+    @Query("SELECT * FROM date_exclusions")
+    fun getAllDateExclusionsFlow(): Flow<List<DateExclusion>>
+
+    @Query("SELECT * FROM date_exclusions")
+    suspend fun getAllDateExclusionsDirect(): List<DateExclusion>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDateExclusion(exclusion: DateExclusion)
+
+    @Query("DELETE FROM date_exclusions WHERE dateStr = :dateStr")
+    suspend fun deleteDateExclusionByDate(dateStr: String)
 }
+

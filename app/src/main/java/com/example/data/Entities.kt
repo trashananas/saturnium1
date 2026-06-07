@@ -23,3 +23,22 @@ data class CycleDayConfig(
     val alarmHour: Int,
     val alarmMinute: Int
 )
+
+@Entity(tableName = "cyclic_reminders")
+data class CyclicReminder(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val label: String,
+    val type: String, // "CYCLE_DAY" or "INTERVAL"
+    val targetCycleDay: Int? = null,
+    val intervalDays: Int? = null,
+    val startDateMillis: Long? = null,
+    val hour: Int,
+    val minute: Int,
+    val isEnabled: Boolean = true
+)
+
+@Entity(tableName = "date_exclusions")
+data class DateExclusion(
+    @PrimaryKey val dateStr: String // Format: "YYYY-MM-DD"
+)
+

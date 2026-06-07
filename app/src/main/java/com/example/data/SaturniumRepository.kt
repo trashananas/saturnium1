@@ -31,4 +31,35 @@ class SaturniumRepository(private val dao: SaturniumDao) {
     suspend fun updateCycle(cycle: ShiftCycle) {
         dao.updateCycle(cycle)
     }
+
+    // Cyclic Reminders
+    val allCyclicReminders: Flow<List<CyclicReminder>> = dao.getAllCyclicRemindersFlow()
+
+    suspend fun getAllCyclicRemindersDirect(): List<CyclicReminder> {
+        return dao.getAllCyclicRemindersDirect()
+    }
+
+    suspend fun insertCyclicReminder(reminder: CyclicReminder): Long {
+        return dao.insertCyclicReminder(reminder)
+    }
+
+    suspend fun deleteCyclicReminder(reminder: CyclicReminder) {
+        dao.deleteCyclicReminder(reminder)
+    }
+
+    // Date Exclusions
+    val allDateExclusions: Flow<List<DateExclusion>> = dao.getAllDateExclusionsFlow()
+
+    suspend fun getAllDateExclusionsDirect(): List<DateExclusion> {
+        return dao.getAllDateExclusionsDirect()
+    }
+
+    suspend fun insertDateExclusion(exclusion: DateExclusion) {
+        dao.insertDateExclusion(exclusion)
+    }
+
+    suspend fun deleteDateExclusionByDate(dateStr: String) {
+        dao.deleteDateExclusionByDate(dateStr)
+    }
 }
+

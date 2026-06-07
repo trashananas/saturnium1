@@ -7,6 +7,9 @@ import android.content.Intent
 import android.util.Log
 import com.example.receiver.AlarmReceiver
 import java.util.Calendar
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
 
 object AlarmHelper {
 
@@ -52,6 +55,7 @@ object AlarmHelper {
      * Scans forward from today to find the next active alarm, schedules it via AlarmManager,
      * and saves details in SharedPreferences so the UI can display them.
      */
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     fun scheduleNextAlarm(context: Context, cycle: ShiftCycle?, configs: List<CycleDayConfig>) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, AlarmReceiver::class.java).apply {
@@ -67,84 +71,130 @@ object AlarmHelper {
 
         if (cycle == null || configs.isEmpty()) {
             alarmManager.cancel(pendingIntent)
-            saveAlarmInPrefs(context, 0, "")
+            saveAlarmInPrefs(context, 0, "No alarms active")
             Log.d(TAG, "No active cycle. Cancelled scheduled alarms.")
             return
         }
 
-        val now = Calendar.getInstance()
-        var nextAlarmCal: Calendar? = null
-        var matchedConfig: CycleDayConfig? = null
-
-        // Scan upcoming 30 days
-        for (i in 0..30) {
-            val checkCal = Calendar.getInstance().apply {
-                add(Calendar.DAY_OF_YEAR, i)
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val database = SaturniumDatabase.getDatabase(context)
+            val dao = database.saturniumDao()
+            
+            val exclusions = try {
+                dao.getAllDateExclusionsDirect().map { it.dateStr }.toSet()
+            } catch (e: Exception) {
+                emptySet()
             }
             
-            val dayIndex = getDayIndexForDate(cycle.startDateMillis, checkCal.timeInMillis, cycle.cycleLength)
-            val config = configs.find { it.dayIndex == dayIndex }
+            val cyclicReminders = try {
+                dao.getAllCyclicRemindersDirect().filter { it.isEnabled }
+            } catch (e: Exception) {
+                emptyList()
+            }
+
+            val now = Calendar.getInstance()
             
-            if (config != null && config.alarmEnabled) {
-                val alarmCal = Calendar.getInstance().apply {
-                    timeInMillis = checkCal.timeInMillis
-                    set(Calendar.HOUR_OF_DAY, config.alarmHour)
-                    set(Calendar.MINUTE, config.alarmMinute)
-                    set(Calendar.SECOND, 0)
-                    set(Calendar.MILLISECOND, 0)
+            // Scan next 60 days to find absolute next candidate
+            var absoluteNextAlarmCal: Calendar? = null
+            var absoluteNextLabel = ""
+            
+            for (i in 0..60) {
+                val checkCal = Calendar.getInstance().apply {
+                    add(Calendar.DAY_OF_YEAR, i)
                 }
-
-                // If scheduled time is in the future, select it!
-                if (alarmCal.timeInMillis > now.timeInMillis) {
-                    nextAlarmCal = alarmCal
-                    matchedConfig = config
-                    break
+                
+                val checkYear = checkCal.get(Calendar.YEAR)
+                val checkMonth = checkCal.get(Calendar.MONTH)
+                val checkDay = checkCal.get(Calendar.DAY_OF_MONTH)
+                val dateStr = String.format("%04d-%02d-%02d", checkYear, checkMonth + 1, checkDay)
+                
+                val dayIndex = getDayIndexForDate(cycle.startDateMillis, checkCal.timeInMillis, cycle.cycleLength)
+                val config = configs.find { it.dayIndex == dayIndex }
+                
+                // Collect day candidates
+                val dayCandidates = mutableListOf<Pair<Calendar, String>>()
+                
+                // 1. Regular shift
+                if (config != null && config.alarmEnabled && !exclusions.contains(dateStr)) {
+                    val sCal = Calendar.getInstance().apply {
+                        timeInMillis = checkCal.timeInMillis
+                        set(Calendar.HOUR_OF_DAY, config.alarmHour)
+                        set(Calendar.MINUTE, config.alarmMinute)
+                        set(Calendar.SECOND, 0)
+                        set(Calendar.MILLISECOND, 0)
+                    }
+                    if (sCal.timeInMillis > now.timeInMillis) {
+                        val formattedDate = String.format("%02d.%02d.%04d", checkDay, checkMonth + 1, checkYear)
+                        dayCandidates.add(sCal to "Смена ${config.dayIndex}: ${config.shiftName} ($formattedDate)")
+                    }
+                }
+                
+                // 2. Cyclic reminders
+                for (reminder in cyclicReminders) {
+                    var isMatched = false
+                    if (reminder.type == "CYCLE_DAY") {
+                        if (reminder.targetCycleDay == dayIndex) {
+                            isMatched = true
+                        }
+                    } else if (reminder.type == "INTERVAL") {
+                        val start = reminder.startDateMillis ?: 0L
+                        val daysBetween = getDaysBetween(start, checkCal.timeInMillis)
+                        val rInterval = reminder.intervalDays ?: 1
+                        if (daysBetween >= 0 && daysBetween % rInterval == 0) {
+                            isMatched = true
+                        }
+                    }
+                    
+                    if (isMatched) {
+                        val rCal = Calendar.getInstance().apply {
+                            timeInMillis = checkCal.timeInMillis
+                            set(Calendar.HOUR_OF_DAY, reminder.hour)
+                            set(Calendar.MINUTE, reminder.minute)
+                            set(Calendar.SECOND, 0)
+                            set(Calendar.MILLISECOND, 0)
+                        }
+                        if (rCal.timeInMillis > now.timeInMillis) {
+                            val formattedDate = String.format("%02d.%02d.%04d", checkDay, checkMonth + 1, checkYear)
+                            dayCandidates.add(rCal to "${reminder.label} ($formattedDate)")
+                        }
+                    }
+                }
+                
+                val nearestOnDay = dayCandidates.minByOrNull { it.first.timeInMillis }
+                if (nearestOnDay != null) {
+                    if (absoluteNextAlarmCal == null || nearestOnDay.first.timeInMillis < absoluteNextAlarmCal.timeInMillis) {
+                        absoluteNextAlarmCal = nearestOnDay.first
+                        absoluteNextLabel = nearestOnDay.second
+                    }
                 }
             }
-        }
 
-        if (nextAlarmCal != null && matchedConfig != null) {
-            // Schedule via AlarmManager
-            try {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    nextAlarmCal.timeInMillis,
-                    pendingIntent
-                )
-                
-                // Format summary details
-                val timeLabel = String.format("%02d:%02d", matchedConfig.alarmHour, matchedConfig.alarmMinute)
-                val dayStr = String.format("%02d.%02d.%04d", 
-                    nextAlarmCal.get(Calendar.DAY_OF_MONTH), 
-                    nextAlarmCal.get(Calendar.MONTH) + 1, 
-                    nextAlarmCal.get(Calendar.YEAR)
-                )
-                val label = "$timeLabel ($dayStr - ${matchedConfig.shiftName})"
-                
-                saveAlarmInPrefs(context, nextAlarmCal.timeInMillis, label)
-                Log.d(TAG, "Scheduled next alarm for: $label")
-            } catch (e: SecurityException) {
-                // FALLBACK if exact alarms aren't allowed
-                alarmManager.set(
-                    AlarmManager.RTC_WAKEUP,
-                    nextAlarmCal.timeInMillis,
-                    pendingIntent
-                )
-                val timeLabel = String.format("%02d:%02d", matchedConfig.alarmHour, matchedConfig.alarmMinute)
-                val dayStr = String.format("%02d.%02d.%04d", 
-                    nextAlarmCal.get(Calendar.DAY_OF_MONTH), 
-                    nextAlarmCal.get(Calendar.MONTH) + 1, 
-                    nextAlarmCal.get(Calendar.YEAR)
-                )
-                val label = "$timeLabel ($dayStr - ${matchedConfig.shiftName}) [Inexact]"
-                saveAlarmInPrefs(context, nextAlarmCal.timeInMillis, label)
-                Log.e(TAG, "SecurityException scheduling exact alarm. Fell back to inexact alarm.", e)
+            if (absoluteNextAlarmCal != null) {
+                try {
+                    alarmManager.setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        absoluteNextAlarmCal.timeInMillis,
+                        pendingIntent
+                    )
+                    val timeLabel = String.format("%02d:%02d", absoluteNextAlarmCal.get(Calendar.HOUR_OF_DAY), absoluteNextAlarmCal.get(Calendar.MINUTE))
+                    val fullLabel = "$timeLabel ($absoluteNextLabel)"
+                    saveAlarmInPrefs(context, absoluteNextAlarmCal.timeInMillis, fullLabel)
+                    Log.d(TAG, "Scheduled next alarm: $fullLabel")
+                } catch (e: SecurityException) {
+                    alarmManager.set(
+                        AlarmManager.RTC_WAKEUP,
+                        absoluteNextAlarmCal.timeInMillis,
+                        pendingIntent
+                    )
+                    val timeLabel = String.format("%02d:%02d", absoluteNextAlarmCal.get(Calendar.HOUR_OF_DAY), absoluteNextAlarmCal.get(Calendar.MINUTE))
+                    val fullLabel = "$timeLabel ($absoluteNextLabel) [Inexact]"
+                    saveAlarmInPrefs(context, absoluteNextAlarmCal.timeInMillis, fullLabel)
+                }
+            } else {
+                alarmManager.cancel(pendingIntent)
+                saveAlarmInPrefs(context, 0, "No alarms active")
+                Log.d(TAG, "No upcoming alarms.")
             }
-        } else {
-            // No upcoming alarms, cancel current pending intent
-            alarmManager.cancel(pendingIntent)
-            saveAlarmInPrefs(context, 0, "No alarms active")
-            Log.d(TAG, "No upcoming alarms found in next 30 days.")
         }
     }
 

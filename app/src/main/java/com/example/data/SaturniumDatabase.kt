@@ -5,7 +5,7 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [ShiftCycle::class, CycleDayConfig::class], version = 1, exportSchema = false)
+@Database(entities = [ShiftCycle::class, CycleDayConfig::class, CyclicReminder::class, DateExclusion::class], version = 2, exportSchema = false)
 abstract class SaturniumDatabase : RoomDatabase() {
 
     abstract fun saturniumDao(): SaturniumDao
