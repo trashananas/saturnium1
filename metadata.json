@@ -1,0 +1,6 @@
+{
+  "name": "Saturnium",
+  "description": "Custom shift-cycle alarm manager with an adaptive columnar calendar that automatically aligns with your work cycle length.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
