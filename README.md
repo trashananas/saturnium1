@@ -7,6 +7,6 @@ This repository contains the Saturnium Android application.
 **Prerequisites:** [Android Studio](https://developer.android.com/studio)
 
 1. Open Android Studio.
-2. Select **Open** and choose `/tmp/workspace/trashananas/saturnium1`.
+2. Select **Open** and choose the directory containing this project.
 3. Let the IDE finish project sync.
 4. Run the app on an emulator or physical device.
